@@ -1,0 +1,15 @@
+[package]
+name = "loading_dock"
+version = "0.1.0"
+authors = ["Brandon Smith <mail@brandonsmith.ninja>"]
+edition = "2018"
+
+[dependencies]
+notify = "3.0.0"
+pathdiff = "0.1.0"
+serde_cbor = "0.9"
+iron = "0.6.0"
+router = "0.6.0"
+lazy_static = "1.3.0"
+url = "1.7.2"
+reqwest = "0.9.17"
