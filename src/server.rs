@@ -5,7 +5,7 @@ extern crate router;
 extern crate url;
 
 use std::path::{PathBuf};
-use std::sync::{Mutex, Arc};
+use std::sync::{Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::collections::HashMap;
 use std::fs::File;
@@ -19,17 +19,15 @@ use iron::prelude::*;
 use iron::status;
 use router::Router;
 
-pub fn init_server(port: &str, file_timestamps: &'static Arc<Mutex<HashMap<PathBuf,Duration>>>, other_nodes: &'static Arc<Mutex<Vec<String>>>) {
 
-    /* HTTP */
-    let mut router = Router::new();
+pub fn init_server(router: &mut Router, file_timestamps: &'static Mutex<HashMap<PathBuf,Duration>>, other_nodes: &'static Mutex<Vec<String>>) {
 
-    router.get("/", move |_req: &mut Request| -> IronResult<Response> {
+    router.get("/", |_req: &mut Request| -> IronResult<Response> {
         Ok(Response::with((status::Ok, "Hello world!")))
     }, "test");
 
     // Pull file <-
-    router.get("/file/:file_path", move |req: &mut Request| -> IronResult<Response> {
+    router.get("/file/:file_path", |req: &mut Request| -> IronResult<Response> {
 
         // get file path
         let file_path = req.extensions.get::<Router>().unwrap().find("file_path").unwrap_or("/");
@@ -125,6 +123,4 @@ pub fn init_server(port: &str, file_timestamps: &'static Arc<Mutex<HashMap<PathB
         return Ok(Response::with((status::Ok, response)));
     }, "other_nodes");
 
-    Iron::new(router).http("localhost:".to_owned() + port).unwrap();
-    print!("Listening on localhost:{}", port);
 }

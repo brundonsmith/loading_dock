@@ -21,6 +21,8 @@ use reqwest::Client;
 mod server;
 use server::init_server;
 
+use iron::prelude::*;
+use router::Router;
 
 // 1. Check network for other instances (given port from CLI, or default port)
 // 2. If no others found...
@@ -35,33 +37,34 @@ use server::init_server;
 
 const DEFAULT_PORT: &str = "9123";
 
-/* Primary state */
+/* State */
 lazy_static! {
-    static ref FILE_TIMESTAMPS: Arc<Mutex<HashMap<PathBuf,Duration>>> = Arc::new(Mutex::new(HashMap::new()));
-    static ref OTHER_NODES: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    static ref FILE_TIMESTAMPS: Mutex<HashMap<PathBuf,Duration>> = Mutex::new(HashMap::new());
+    static ref OTHER_NODES: Mutex<Vec<String>> = Mutex::new(Vec::new());
 }
 
 fn main() {
-    print!("Hello world!\n");
 
     /* CLI Args */
-    // TODO: https://stackoverflow.com/questions/15619320/how-to-access-command-line-parameters
-    
     let args: Vec<String> = env::args().collect();
-
     let port = match args.get(1) {
         Some(p) => p,
         None => DEFAULT_PORT
     };
-    match args.get(2) {
+    let contact = args.get(2);
+    
+    /* Start HTTP server */
+    let mut router = Router::new();
+    init_server(&mut router, &FILE_TIMESTAMPS, &OTHER_NODES);
+    let iron = Iron::new(router);
+    iron.http("localhost:".to_owned() + port).unwrap();
+    print!("Listening on localhost:{}\n", port);
+
+    /* Greet */
+    match contact {
         Some(other) => greet_contact(&OTHER_NODES, &port, other),
         None => {}
     };
-
-
-    /* Start HTTP server */
-    init_server(port, &FILE_TIMESTAMPS, &OTHER_NODES);
-
 
     /* Watching */
 
@@ -104,13 +107,13 @@ fn get_timestamp() -> Duration {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap()
 }
 
-fn log_change(map: &'static Arc<Mutex<HashMap<PathBuf,Duration>>>, path: PathBuf) {
+fn log_change(map: &'static Mutex<HashMap<PathBuf,Duration>>, path: PathBuf) {
     let relative_path = pathdiff::diff_paths(&path, &get_watch_dir()).unwrap();
     map.lock().unwrap().insert(relative_path, get_timestamp());
     print!("Change logged to: {:?}\n", map);
 }
 
-fn greet_contact(other_nodes: &'static Arc<Mutex<Vec<String>>>, my_port: &str, address: &str) {
+fn greet_contact(other_nodes: &'static Mutex<Vec<String>>, my_port: &str, address: &str) {
     print!("Greeting {}\n", address);
     Client::new()
         .post(&(String::from("http://") + address + "/greet/" + my_port))
