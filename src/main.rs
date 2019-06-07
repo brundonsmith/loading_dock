@@ -1,28 +1,34 @@
+use std::env;
+use std::path::{PathBuf};
+use std::sync::{Mutex};
+use std::sync::mpsc::channel;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::collections::{HashMap,HashSet};
+use std::thread;
+use std::ops::{Deref};
+use std::str;
+use std::fs::File;
+use std::io::{Read, Write};
+
 extern crate notify;
+use notify::{Watcher, RecursiveMode, watcher, DebouncedEvent};
 extern crate pathdiff;
 extern crate iron;
+use iron::prelude::*;
 extern crate router;
+use router::Router;
 extern crate reqwest;
+use reqwest::Client;
+use url::form_urlencoded;
 
 #[macro_use]
 extern crate lazy_static;
 
-use std::env;
-use std::path::{PathBuf};
-use std::sync::{Mutex, Arc};
-use std::sync::mpsc::channel;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use std::collections::HashMap;
 
-use notify::{Watcher, RecursiveMode, watcher, DebouncedEvent};
-
-use reqwest::Client;
-
+// internal
 mod server;
 use server::init_server;
 
-use iron::prelude::*;
-use router::Router;
 
 // 1. Check network for other instances (given port from CLI, or default port)
 // 2. If no others found...
@@ -40,31 +46,36 @@ const DEFAULT_PORT: &str = "9123";
 /* State */
 lazy_static! {
     static ref FILE_TIMESTAMPS: Mutex<HashMap<PathBuf,Duration>> = Mutex::new(HashMap::new());
-    static ref OTHER_NODES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    static ref OTHER_NODES: Mutex<HashSet<String>> = Mutex::new(HashSet::new());
 }
 
 fn main() {
+    print!("main()\n");
 
     /* CLI Args */
     let args: Vec<String> = env::args().collect();
-    let port = match args.get(1) {
+    let dir = PathBuf::from(args.get(1).unwrap());
+    let port = String::from(match args.get(2) {
         Some(p) => p,
         None => DEFAULT_PORT
-    };
-    let contact = args.get(2);
+    });
+    let contact = args.get(3);
     
+
     /* Start HTTP server */
     let mut router = Router::new();
-    init_server(&mut router, &FILE_TIMESTAMPS, &OTHER_NODES);
-    let iron = Iron::new(router);
-    iron.http("localhost:".to_owned() + port).unwrap();
-    print!("Listening on localhost:{}\n", port);
+    init_server(&mut router, &FILE_TIMESTAMPS, &OTHER_NODES, dir.to_owned());
 
     /* Greet */
     match contact {
         Some(other) => greet_contact(&OTHER_NODES, &port, other),
         None => {}
     };
+
+    thread::spawn(move || {
+        print!("Listening on localhost:{}\n", &port);
+        Iron::new(router).http("localhost:".to_owned() + &port).unwrap();
+    });
 
     /* Watching */
 
@@ -77,20 +88,21 @@ fn main() {
 
     // Add a path to be watched. All files and directories at that path and
     // below will be monitored for changes.
-    watcher.watch(get_watch_dir(), RecursiveMode::Recursive).unwrap();
+    print!("{}\n", dir.to_str().unwrap());
+    watcher.watch(&dir, RecursiveMode::Recursive).unwrap();
 
     loop {
         match receiver.recv() {
             Ok(event) => {
                 print!("{:?}\n", event);
                 match event {
-                    | DebouncedEvent::NoticeWrite(path)
-                    | DebouncedEvent::NoticeRemove(path)
-                    | DebouncedEvent::Create(path)
-                    | DebouncedEvent::Write(path)
-                    | DebouncedEvent::Chmod(path)
-                    | DebouncedEvent::Remove(path) => log_change(&FILE_TIMESTAMPS, path),
-                      DebouncedEvent::Rename(_path1, path2) => log_change(&FILE_TIMESTAMPS, path2),
+                    | DebouncedEvent::NoticeWrite(file_path)
+                    | DebouncedEvent::NoticeRemove(file_path)
+                    | DebouncedEvent::Create(file_path)
+                    | DebouncedEvent::Write(file_path)
+                    | DebouncedEvent::Chmod(file_path)
+                    | DebouncedEvent::Remove(file_path)
+                    | DebouncedEvent::Rename(_, file_path) => handle_file_change(&dir, &FILE_TIMESTAMPS, &OTHER_NODES, &file_path),
                     _ => (),
                 };
             },
@@ -99,29 +111,63 @@ fn main() {
     }
 }
 
+/*
 fn get_watch_dir() -> PathBuf {
-    env::current_dir().unwrap().join("/dir-test")
+    env::current_dir().unwrap().join("dir-test")
 }
+*/
 
 fn get_timestamp() -> Duration {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap()
 }
 
-fn log_change(map: &'static Mutex<HashMap<PathBuf,Duration>>, path: PathBuf) {
-    let relative_path = pathdiff::diff_paths(&path, &get_watch_dir()).unwrap();
-    map.lock().unwrap().insert(relative_path, get_timestamp());
-    print!("Change logged to: {:?}\n", map);
-}
-
-fn greet_contact(other_nodes: &'static Mutex<Vec<String>>, my_port: &str, address: &str) {
+fn greet_contact(other_nodes: &'static Mutex<HashSet<String>>, my_port: &str, address: &str) {
     print!("Greeting {}\n", address);
-    Client::new()
+
+    let mut res = Client::new()
         .post(&(String::from("http://") + address + "/greet/" + my_port))
         .send()
-        .and_then(|_res| {
-            other_nodes.lock().unwrap().push(String::from(address));
-            return Ok(());
-        })
         .unwrap();
+
+    let others = res.text().unwrap();
+    let mut locked = other_nodes.lock().unwrap();
+    
+    locked.insert(String::from(address));
+    for addr in others.split('\n') {
+        if addr != "" {
+            locked.insert(String::from(addr));
+        }
+    }
+
+    print!("other_nodes: {:?}\n", locked);
 }
 
+fn handle_file_change(dir: &PathBuf, file_timestamps: &'static Mutex<HashMap<PathBuf,Duration>>, other_nodes: &'static Mutex<HashSet<String>>, file_path: &PathBuf) {
+    let relative_path = pathdiff::diff_paths(&file_path, &dir).unwrap();
+
+    // log timestamp
+    file_timestamps.lock().unwrap().insert(relative_path.to_owned(), get_timestamp());
+
+    // load file
+    let mut file = File::open(file_path).unwrap();
+    let mut buf: Vec<u8> = Vec::new();
+    file.read_to_end(&mut buf).unwrap();
+
+    // send file
+    publish_file(other_nodes, &relative_path, &buf);
+}
+
+fn publish_file(other_nodes: &'static Mutex<HashSet<String>>, relative_path: &PathBuf, file_contents: &Vec<u8>) {
+    let string = relative_path.to_string_lossy();
+    let encoding: Vec<&str> = form_urlencoded::byte_serialize(string.as_bytes()).collect();
+    let encoded: String = encoding.into_iter().collect();
+
+    for other in Deref::deref(&other_nodes.lock().unwrap()) {
+        println!("Sending to: {}", &other);
+        let mut _res = Client::new()
+            .post(&(String::from("http://") + &other + "/file/" + &encoded))
+            .body(file_contents.to_owned())
+            .send()
+            .unwrap();
+    }
+}
