@@ -5,10 +5,9 @@ use std::sync::mpsc::channel;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::collections::{HashMap,HashSet};
 use std::thread;
-use std::ops::{Deref};
 use std::str;
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::{Read};
 
 extern crate notify;
 use notify::{Watcher, RecursiveMode, watcher, DebouncedEvent};
@@ -17,9 +16,6 @@ extern crate iron;
 use iron::prelude::*;
 extern crate router;
 use router::Router;
-extern crate reqwest;
-use reqwest::Client;
-use url::form_urlencoded;
 
 #[macro_use]
 extern crate lazy_static;
@@ -27,8 +23,8 @@ extern crate lazy_static;
 
 // internal
 mod server;
-use server::init_server;
-
+mod requests;
+mod serialization;
 
 // 1. Check network for other instances (given port from CLI, or default port)
 // 2. If no others found...
@@ -64,11 +60,11 @@ fn main() {
 
     /* Start HTTP server */
     let mut router = Router::new();
-    init_server(&mut router, &FILE_TIMESTAMPS, &OTHER_NODES, dir.to_owned());
+    server::init_server(&mut router, &FILE_TIMESTAMPS, &OTHER_NODES, dir.to_owned());
 
     /* Greet */
     match contact {
-        Some(other) => greet_contact(&OTHER_NODES, &port, other),
+        Some(other) => requests::greet_contact(&FILE_TIMESTAMPS, &OTHER_NODES, &port, other),
         None => {}
     };
 
@@ -121,27 +117,6 @@ fn get_timestamp() -> Duration {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap()
 }
 
-fn greet_contact(other_nodes: &'static Mutex<HashSet<String>>, my_port: &str, address: &str) {
-    print!("Greeting {}\n", address);
-
-    let mut res = Client::new()
-        .post(&(String::from("http://") + address + "/greet/" + my_port))
-        .send()
-        .unwrap();
-
-    let others = res.text().unwrap();
-    let mut locked = other_nodes.lock().unwrap();
-    
-    locked.insert(String::from(address));
-    for addr in others.split('\n') {
-        if addr != "" {
-            locked.insert(String::from(addr));
-        }
-    }
-
-    print!("other_nodes: {:?}\n", locked);
-}
-
 fn handle_file_change(dir: &PathBuf, file_timestamps: &'static Mutex<HashMap<PathBuf,Duration>>, other_nodes: &'static Mutex<HashSet<String>>, file_path: &PathBuf) {
     let relative_path = pathdiff::diff_paths(&file_path, &dir).unwrap();
 
@@ -154,20 +129,5 @@ fn handle_file_change(dir: &PathBuf, file_timestamps: &'static Mutex<HashMap<Pat
     file.read_to_end(&mut buf).unwrap();
 
     // send file
-    publish_file(other_nodes, &relative_path, &buf);
-}
-
-fn publish_file(other_nodes: &'static Mutex<HashSet<String>>, relative_path: &PathBuf, file_contents: &Vec<u8>) {
-    let string = relative_path.to_string_lossy();
-    let encoding: Vec<&str> = form_urlencoded::byte_serialize(string.as_bytes()).collect();
-    let encoded: String = encoding.into_iter().collect();
-
-    for other in Deref::deref(&other_nodes.lock().unwrap()) {
-        println!("Sending to: {}", &other);
-        let mut _res = Client::new()
-            .post(&(String::from("http://") + &other + "/file/" + &encoded))
-            .body(file_contents.to_owned())
-            .send()
-            .unwrap();
-    }
+    requests::publish_file(other_nodes, &relative_path, &buf);
 }

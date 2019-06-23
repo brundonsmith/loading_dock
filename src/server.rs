@@ -17,27 +17,31 @@ extern crate router;
 extern crate url;
 use url::form_urlencoded;
 
+// internal
+use crate::serialization;
 
 pub fn init_server(router: &mut Router, file_timestamps: &'static Mutex<HashMap<PathBuf,Duration>>, other_nodes: &'static Mutex<HashSet<String>>, dir: PathBuf) {
 
+    // Test
     router.get("/", |_req: &mut Request| -> IronResult<Response> {
         Ok(Response::with((status::Ok, "Hello world!")))
     }, "test");
 
+    // Greet
     router.post("/greet/:remote_port", move |req: &mut Request| -> IronResult<Response> {
         
         // get remote address and port
         let remote_port = get_param(req, "remote_port");
-        let other_addr: String = get_ip(req) + ":" + remote_port;
-        println!("POST /greet/{}", &other_addr);
+        let other_addr = get_ip(req) + ":" + remote_port;
+        println!("=> POST /greet/{}", &other_addr);
+
+        // serialize before adding new node, so it doesn't get itself back
+        let mut locked = other_nodes.lock().unwrap();
+        let response = serialization::serialize_other_nodes(&locked);
 
         // record new node
-        let mut locked = other_nodes.lock().unwrap();
-        let response = serialize_nodes(&locked);
-
         locked.insert(other_addr);
-
-        print!("other_nodes: {:?}\n", locked);
+        println!("other_nodes: {:?}", locked);
         
         return Ok(Response::with((status::Ok, response)));
     }, "greet");
@@ -50,13 +54,18 @@ pub fn init_server(router: &mut Router, file_timestamps: &'static Mutex<HashMap<
         let file_path = get_param(req, "file_path");
         let parse: Vec<(String, String)> = form_urlencoded::parse(file_path.as_bytes()).into_owned().collect();
         let file_path = parse[0].0.to_owned();
+        println!("=> GET /file/{}", &file_path);
 
         // get file contents
-        let mut file = File::open(dir2.join(file_path)).unwrap();
-        let mut buf: Vec<u8> = Vec::new();
-        file.read_to_end(&mut buf).unwrap();
-        
-        return Ok(Response::with((status::Ok, buf)));
+        return match File::open(dir2.join(file_path)) {
+            Ok(mut file) => {
+                let mut buf: Vec<u8> = Vec::new();
+                file.read_to_end(&mut buf).unwrap();
+
+                Ok(Response::with((status::Ok, buf)))
+            },
+            Err(_) => Ok(Response::with(status::NotFound))
+        };
     }, "get_file");
 
     // Push file change ->
@@ -67,7 +76,7 @@ pub fn init_server(router: &mut Router, file_timestamps: &'static Mutex<HashMap<
         let file_path = get_param(req, "file_path");
         let parse: Vec<(String, String)> = form_urlencoded::parse(file_path.as_bytes()).into_owned().collect();
         let file_path = parse[0].0.to_owned();
-        println!("POST /file/{}", &file_path);
+        println!("=> POST /file/{}", &file_path);
 
         // get request body
         let mut buf: Vec<u8> = Vec::new();
@@ -90,34 +99,23 @@ pub fn init_server(router: &mut Router, file_timestamps: &'static Mutex<HashMap<
 
     // Pull files list <-
     router.get("/all-files", move |_req: &mut Request| -> IronResult<Response> {
-        let mut response = String::new();
-
-        // serialize map
         let mut_g = file_timestamps.lock().unwrap();
-        let locked = Deref::deref(&mut_g);
-        for (file, timestamp) in locked {
-            response.push_str("\n");
-            response.push_str(&file.to_string_lossy());
-            response.push_str("|");
-            response.push_str(timestamp.as_millis().to_string().as_ref());
-        }
+        let derefd = Deref::deref(&mut_g);
 
-        return Ok(Response::with((status::Ok, response)));
+        return Ok(Response::with((
+            status::Ok, 
+            serialization::serialize_file_timestamps(&derefd)
+        )));
     }, "all_files");
 
     // Pull nodes list <-
     router.get("/other-nodes", move |_req: &mut Request| -> IronResult<Response> {
-        let mut response = String::new();
+        let mutex_guard = other_nodes.lock().unwrap();
 
-        // serialize list
-        let mut_g = other_nodes.lock().unwrap();
-        let locked = Deref::deref(&mut_g);
-        for address in locked {
-            response.push_str("\n");
-            response.push_str(&address);
-        }
-
-        return Ok(Response::with((status::Ok, response)));
+        return Ok(Response::with((
+            status::Ok, 
+            serialization::serialize_other_nodes(Deref::deref(&mutex_guard))
+        )));
     }, "other_nodes");
 
 }
@@ -131,15 +129,4 @@ fn get_ip(req: &Request) -> String {
         IpAddr::V4(addr) => addr.to_string(),
         IpAddr::V6(addr) => String::from("[") + &addr.to_string() + "]"
     }
-}
-
-fn serialize_nodes(nodes: &HashSet<String>) -> String {
-    let mut res = String::new();
-
-    for node in nodes {
-        res.push_str(&node);
-        res.push_str("\n");
-    }
-
-    return res;
 }
